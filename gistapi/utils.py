@@ -1,28 +1,22 @@
 import asyncio
 import re
-from typing import List
+from typing import Generator, List
 import aiohttp
 import requests
 
 
-def gists_for_user(username: str):
-    """Provides the list of gist metadata for a given user.
-
-    This abstracts the /users/:username/gist endpoint from the Github API.
-    See https://developer.github.com/v3/gists/#list-a-users-gists for
-    more information.
-
-    Args:
-        username (string): the user to query gists for
-
-    Returns:
-        The dict parsed from the json response from the Github API.  See
-        the above URL for details of the expected structure.
-    """
-    gists_url = 'https://api.github.com/users/{username}/gists'\
-        .format(username=username)
-    response = requests.get(gists_url)
-    return response.json()
+def gists_for_user_generator(username: str):
+    """Generator that yields gists for a given user"""
+    url = f"https://api.github.com/users/{username}/gists"
+    per_page = 100
+    page = 1
+    while True:
+        response = requests.get(
+            url, params={"per_page": per_page, "page": page})
+        if not response.ok or not response.json():
+            break
+        yield response.json()
+        page += 1
 
 
 class GistMatcher:
@@ -42,7 +36,12 @@ class GistMatcher:
         self._loop = loop
         self._pattern = pattern
 
-    async def _match(self, gists: List[dict]) -> List[dict]:
+    async def _match(
+        self,
+        gists_generator: Generator[dict, None, None],
+        limit=100,
+        offset=0
+    ) -> List[dict]:
         """Matches the pattern against a list of gists.
 
         Args:
@@ -56,12 +55,13 @@ class GistMatcher:
         async with aiohttp.ClientSession(loop=self._loop) as session:
             # Create a list of futures
             tasks = []
-            matching_gists = []
-            for gist in gists:
-                for file in gist['files'].values():
-                    # Submit a task to the thread pool
-                    # if the file is text based
-                    if 'text' in file['type']:
+            matching_gists = {}
+            for gist_batch in gists_generator:
+                print(len(gist_batch))
+                tasks_gists = []
+                for gist in gist_batch:
+                    for file in gist['files'].values():
+                        # Submit a task to the event loop
                         tasks.append(
                             self._loop.create_task(
                                 self._load_file_content(
@@ -70,17 +70,26 @@ class GistMatcher:
                                 )
                             )
                         )
+                        tasks_gists.append(gist)
 
                 # Gather the results
                 results = await asyncio.gather(*tasks)
 
                 # Check if the pattern is in the results with regex
-                for result in results:
+                for i, result in enumerate(results):
                     if re.search(self._pattern, result):
-                        matching_gists.append(gist)
-                        break
+                        matching_gists[tasks_gists[i]['id']] = tasks_gists[i]
 
-            return matching_gists
+                    print(len(matching_gists), limit, offset)
+                    if len(matching_gists) >= limit + offset:
+                        return list(matching_gists.values())[
+                            offset:offset+limit
+                        ]
+
+                # Reset the tasks list
+                tasks = []
+
+            return list(matching_gists.values())[offset:offset+limit]
 
     async def _load_file_content(
         self,
@@ -99,7 +108,12 @@ class GistMatcher:
         async with session.get(file_url) as response:
             return await response.text()
 
-    def get_matching_gists(self, gists: List[dict]) -> List[dict]:
+    def get_matching_gists(
+        self,
+        gists: List[dict],
+        limit=100,
+        offset=0
+    ) -> List[dict]:
         """Matches the pattern against a list of gists.
 
         Args:
@@ -108,4 +122,4 @@ class GistMatcher:
         Returns:
             A list of gists that match the pattern.
         """
-        return self._loop.run_until_complete(self._match(gists))
+        return self._loop.run_until_complete(self._match(gists, limit, offset))

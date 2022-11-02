@@ -12,8 +12,10 @@ import asyncio
 from flask import Flask, jsonify
 from flask_pydantic import validate
 
+
+from .filters import GistSearchQuery
 from .serializers import GistSearchBody
-from .utils import GistMatcher, gists_for_user
+from .utils import GistMatcher, gists_for_user_generator
 
 
 app = Flask(__name__)
@@ -28,7 +30,7 @@ def ping():
 
 @app.route("/api/v1/search", methods=['POST'])
 @validate()
-def search(body: GistSearchBody):
+def search(body: GistSearchBody, query: GistSearchQuery):
     """Provides matches for a single pattern across a single users gists.
 
     Pulls down a list of all gists for a given user and then searches
@@ -43,10 +45,11 @@ def search(body: GistSearchBody):
     pattern = body.pattern
 
     result = {}
-    gists = gists_for_user(username)
+    gists_generator = gists_for_user_generator(username)
 
     matcher = GistMatcher(loop, pattern)
-    matches = matcher.get_matching_gists(gists)
+    matches = matcher.get_matching_gists(
+        gists_generator, query.limit, query.offset)
 
     result['status'] = 'success'
     result['username'] = username
